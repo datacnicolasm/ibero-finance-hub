@@ -1,0 +1,54 @@
+# --- Cursor & IDEs ---
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Python & Environment ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# --- Virtual Environments ---
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# --- Streamlit ---
+.streamlit/config.toml
+# No ignores .streamlit/secrets.toml si planeas usarlo para desarrollo local, 
+# pero NUNCA lo subas a GitHub si contiene llaves reales.
+# .streamlit/secrets.toml
+
+# --- OS specific files ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Data & Notebooks ---
+.ipynb_checkpoints
+*.csv
+*.xlsx
+# Solo ignora CSV/XLSX si son datos de prueba. 
+# Si son plantillas necesarias para la app, no los ignores.

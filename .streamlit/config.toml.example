@@ -1,0 +1,13 @@
+# Copiar a config.toml en la misma carpeta para activar tema oscuro nativo.
+# Si config.toml está en .gitignore, cada desarrollador mantiene su copia local.
+
+[theme]
+base = "dark"
+primaryColor = "#1e3a5f"
+backgroundColor = "#0f172a"
+secondaryBackgroundColor = "#1e293b"
+textColor = "#e2e8f0"
+font = "sans serif"
+
+[server]
+headless = true
