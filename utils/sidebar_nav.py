@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import streamlit as st
 from streamlit_option_menu import option_menu
 
@@ -26,6 +28,8 @@ PENDING_NAV_KEY = "pending_nav_module"
 
 _ID_TO_LABEL: dict[str, str] = {row[0]: row[1] for row in NAV_ROWS}
 _LABEL_TO_ID: dict[str, str] = {row[1]: row[0] for row in NAV_ROWS}
+
+_LOGO_PATH = Path(__file__).resolve().parent.parent / "assets" / "logo-header.png"
 
 
 def _menu_index_for_module(module_id: str) -> int:
@@ -60,16 +64,31 @@ def render_sidebar() -> str:
     st.session_state[MENU_STATE_KEY] = _ID_TO_LABEL[current_module]
 
     with st.sidebar:
+        logo_col, title_col = st.columns(
+            [0.34, 0.66],
+            vertical_alignment="center",
+            gap="small",
+        )
+        with logo_col:
+            if _LOGO_PATH.is_file():
+                st.image(str(_LOGO_PATH), width=72)
+            else:
+                st.markdown(
+                    '<div class="ibero-side-logo-fallback">IF</div>',
+                    unsafe_allow_html=True,
+                )
+        with title_col:
+            st.markdown(
+                """
+                <div class="ibero-side-title">
+                  IBERO FINANCE HUB
+                  <span class="sub">Corporación Universitaria Iberoamericana</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
         st.markdown(
-            """
-            <div class="ibero-side-brand">
-              <div class="ibero-side-logo"><span>IF</span></div>
-              <div class="ibero-side-title">
-                IBERO FINANCE HUB
-                <span class="sub">Corporación Universitaria Iberoamericana</span>
-              </div>
-            </div>
-            """,
+            "<div style='margin-bottom: 0.85rem; padding: 0 0.15rem;'></div>",
             unsafe_allow_html=True,
         )
         selected_label = option_menu(

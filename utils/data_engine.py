@@ -381,3 +381,193 @@ def build_valuation_inputs(ticker: str, info: Optional[dict[str, Any]] = None) -
         default_country_risk=_default_country_risk(data),
         default_risk_free=rf,
     )
+
+
+def _statement_latest_value(df: pd.DataFrame, row_aliases: tuple[str, ...]) -> Optional[float]:
+    """Return the most recent numeric value for the first matching row label."""
+    if df is None or df.empty:
+        return None
+    index_labels = [str(i) for i in df.index]
+    for alias in row_aliases:
+        for label in index_labels:
+            if alias.lower() in label.lower():
+                series = pd.to_numeric(df.loc[label], errors="coerce").dropna()
+                if len(series) > 0:
+                    return float(series.iloc[0])
+    return None
+
+
+def _load_balance_sheet(ticker: str) -> tuple[pd.DataFrame, str]:
+    """Load balance sheet; prefer quarterly with annual fallback."""
+    t = yf.Ticker(ticker.strip().upper())
+    try:
+        q = t.quarterly_balance_sheet
+        if q is not None and not q.empty:
+            return q.copy(), "quarterly"
+    except Exception:
+        pass
+    try:
+        a = t.balance_sheet
+        if a is not None and not a.empty:
+            return a.copy(), "annual"
+    except Exception:
+        pass
+    return pd.DataFrame(), "none"
+
+
+def _load_income_statement(ticker: str) -> tuple[pd.DataFrame, str]:
+    """Load income statement; prefer quarterly with annual fallback."""
+    t = yf.Ticker(ticker.strip().upper())
+    try:
+        q = t.quarterly_financials
+        if q is not None and not q.empty:
+            return q.copy(), "quarterly"
+    except Exception:
+        pass
+    try:
+        a = t.financials
+        if a is not None and not a.empty:
+            return a.copy(), "annual"
+    except Exception:
+        pass
+    return pd.DataFrame(), "none"
+
+
+def _build_sandbox_metrics(
+    info: dict[str, Any],
+    balance_sheet: pd.DataFrame,
+    income_statement: pd.DataFrame,
+) -> dict[str, float]:
+    """Consolidate scalar metrics with statement + info fallbacks."""
+    tax = _default_tax_rate(info)
+
+    total_debt = _statement_latest_value(
+        balance_sheet,
+        ("Total Debt", "Long Term Debt", "Short Long Term Debt"),
+    )
+    if total_debt is None:
+        total_debt = _safe_float(info.get("totalDebt")) or 0.0
+
+    total_cash = _statement_latest_value(
+        balance_sheet,
+        ("Cash", "Cash And Cash Equivalents", "Cash Cash Equivalents"),
+    )
+    if total_cash is None:
+        total_cash = _safe_float(info.get("totalCash")) or _safe_float(info.get("cash")) or 0.0
+
+    total_liab = _statement_latest_value(
+        balance_sheet,
+        ("Total Liab", "Total Liabilities Net Minority Interest", "Total Liabilities"),
+    )
+    if total_liab is None:
+        total_liab = 0.0
+
+    total_revenue = _statement_latest_value(
+        income_statement,
+        ("Total Revenue", "Revenue", "Operating Revenue"),
+    )
+    if total_revenue is None:
+        total_revenue = _safe_float(info.get("totalRevenue")) or 0.0
+
+    ebitda = _statement_latest_value(
+        income_statement,
+        ("EBITDA", "Normalized EBITDA"),
+    )
+    if ebitda is None:
+        ebitda = _safe_float(info.get("ebitda")) or 0.0
+
+    interest = _statement_latest_value(
+        income_statement,
+        ("Interest Expense", "Interest Expense Non Operating"),
+    )
+    if interest is None:
+        interest = _safe_float(info.get("interestExpense"))
+    if interest is not None:
+        interest = abs(interest)
+    else:
+        interest = 0.0
+
+    pretax = _statement_latest_value(
+        income_statement,
+        (
+            "Pretax Income",
+            "Income Before Tax",
+            "Earnings Before Tax",
+        ),
+    )
+    if pretax is None:
+        pretax = _safe_float(info.get("pretaxIncome")) or 0.0
+
+    return {
+        "total_debt": float(total_debt),
+        "total_cash": float(total_cash),
+        "total_liabilities": float(total_liab),
+        "total_revenue": float(total_revenue),
+        "ebitda": float(ebitda),
+        "interest_expense": float(interest),
+        "tax_rate": float(tax),
+        "pretax_income": float(pretax),
+    }
+
+
+@st.cache_data(show_spinner=False)
+def fetch_sandbox_data(ticker_symbol: str) -> dict[str, Any]:
+    """Consolidate market, statements and macro data for Sandbox Quant.
+
+    Args:
+        ticker_symbol: Yahoo Finance symbol.
+
+    Returns:
+        Structured dict with ``market``, ``market_data``, ``macro``,
+        ``macro_ratios``, ``balance_sheet``, ``income_statement``, ``metrics``,
+        and ``sources`` metadata.
+    """
+    symbol = (ticker_symbol or "").strip().upper() or "AAPL"
+    info = fetch_ticker_info(symbol)
+    snap = fetch_market_snapshot(symbol)
+
+    price = _safe_float(
+        snap.get("last_price")
+        or info.get("currentPrice")
+        or info.get("regularMarketPrice")
+    ) or 0.01
+    shares = _safe_float(info.get("sharesOutstanding")) or 0.0
+    mcap = _safe_float(info.get("marketCap")) or snap.get("market_cap")
+    if (shares is None or shares <= 0) and mcap and price > 0:
+        shares = mcap / price
+    shares = max(float(shares or 0.0), 1.0)
+
+    beta = _safe_float(info.get("beta")) or DEFAULT_BETA
+    market_cap = float(mcap) if mcap and mcap > 0 else price * shares
+
+    balance_sheet, bs_period = _load_balance_sheet(symbol)
+    income_statement, is_period = _load_income_statement(symbol)
+    metrics = _build_sandbox_metrics(info, balance_sheet, income_statement)
+    rf_decimal = fetch_risk_free_rate()
+
+    return {
+        "ticker": symbol,
+        "market": {
+            "last_price": float(price),
+            "shares_outstanding": shares,
+            "beta": float(beta),
+            "market_cap": market_cap,
+            "country": str(info.get("country") or ""),
+            "exchange": str(info.get("exchange") or ""),
+        },
+        "market_data": {
+            "current_price": float(price),
+            "beta": float(beta),
+            "market_cap": market_cap,
+            "shares_outstanding": shares,
+        },
+        "macro": {"risk_free_rate": rf_decimal},
+        "macro_ratios": {"risk_free_rate": rf_decimal * 100.0},
+        "balance_sheet": balance_sheet,
+        "income_statement": income_statement,
+        "metrics": metrics,
+        "sources": {
+            "balance_sheet_period": bs_period,
+            "income_statement_period": is_period,
+        },
+    }

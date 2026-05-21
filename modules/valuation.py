@@ -34,7 +34,6 @@ def render() -> None:
     st.markdown(
         """
         <div class="ibero-hero">
-            <div class="ibero-kicker">Corporación Universitaria Iberoamericana</div>
             <h1>Motor de Valoración</h1>
             <p>
                 Modelo DCF y WACC con CAPM y prima de riesgo país: ajuste supuestos
@@ -187,7 +186,13 @@ def render() -> None:
             )
         else:
             import plotly.graph_objects as go
-            from utils.styles import EMERALD, RUBY
+            from utils.styles import (
+                BG_BASE,
+                BG_CARD,
+                GOLD_DARK,
+                PLOTLY_CHART_CONFIG,
+                TEXT_MAIN,
+            )
 
             with st.container(border=True):
                 labels = result["chart_labels"]
@@ -199,7 +204,7 @@ def render() -> None:
                         x=labels,
                         y=chart_fcf,
                         name="FCF nominal",
-                        marker_color="rgba(30, 58, 95, 0.85)",
+                        marker_color="rgba(209, 158, 64, 0.45)",
                     )
                 )
                 fig.add_trace(
@@ -208,21 +213,26 @@ def render() -> None:
                         y=chart_pv,
                         name="Valor presente",
                         mode="lines+markers",
-                        line=dict(color=EMERALD, width=2),
+                        line=dict(color=GOLD_DARK, width=2),
                         marker=dict(size=8),
                     )
                 )
                 fig.update_layout(
                     title=f"Proyección DCF — {inputs.ticker}",
-                    template="plotly_dark",
+                    template="plotly_white",
                     height=420,
                     barmode="group",
-                    paper_bgcolor="rgba(15,23,42,0.55)",
-                    plot_bgcolor="rgba(15,23,42,0.3)",
-                    font=dict(color="#e2e8f0"),
+                    paper_bgcolor=BG_CARD,
+                    plot_bgcolor=BG_BASE,
+                    font=dict(color=TEXT_MAIN),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    modebar=dict(
+                        bgcolor="rgba(255, 255, 255, 0.96)",
+                        color=TEXT_MAIN,
+                        activecolor=GOLD_DARK,
+                    ),
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CHART_CONFIG)
 
             if vps > market * 1.02:
                 st.success("Activo Subvalorado (Oportunidad de Compra)")

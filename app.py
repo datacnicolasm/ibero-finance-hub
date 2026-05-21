@@ -1,6 +1,6 @@
 """Ibero Finance Intelligence Hub — entrypoint (config + navegación + dispatch).
 
-Para tema oscuro nativo: copia ``.streamlit/config.toml.example`` a ``.streamlit/config.toml``.
+Tema institucional Ibero: ``.streamlit/config.toml`` (ver también ``config.toml.example``).
 """
 
 from __future__ import annotations

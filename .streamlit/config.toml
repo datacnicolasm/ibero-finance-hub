@@ -1,6 +1,3 @@
-# Tema institucional Ibero — copiar a config.toml si no está versionado.
-# El repo incluye config.toml con la misma paleta para todos los entornos.
-
 [theme]
 primaryColor = "#e8c042"
 backgroundColor = "#ffffff"

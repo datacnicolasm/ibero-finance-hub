@@ -36,7 +36,6 @@ env.bak/
 venv.bak/
 
 # --- Streamlit ---
-.streamlit/config.toml
 # No ignores .streamlit/secrets.toml si planeas usarlo para desarrollo local, 
 # pero NUNCA lo subas a GitHub si contiene llaves reales.
 # .streamlit/secrets.toml

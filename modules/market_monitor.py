@@ -15,7 +15,16 @@ from utils.data_engine import (
     is_equity_ticker,
 )
 from utils.sidebar_nav import navigate_to_module
-from utils.styles import EMERALD, RUBY
+from utils.styles import (
+    BG_BASE,
+    BG_CARD,
+    BORDER_SUBTLE,
+    CHART_DOWN,
+    CHART_UP,
+    GOLD_DARK,
+    PLOTLY_CHART_CONFIG,
+    TEXT_MAIN,
+)
 
 _TIMEFRAME_LABELS: tuple[str, ...] = ("1D", "5D", "1M", "6M", "YTD", "1Y", "MAX")
 
@@ -80,7 +89,6 @@ def render() -> None:
     st.markdown(
         """
         <div class="ibero-hero">
-            <div class="ibero-kicker">Corporación Universitaria Iberoamericana</div>
             <h1>Market Monitor</h1>
             <p>
                 Consola de mercado para seguimiento intradía y multi-horizonte: cotización
@@ -172,21 +180,32 @@ def render() -> None:
                 help="Price × shares out.",
             )
 
-    if is_equity_ticker(info):
+    bridge_col1, bridge_col2 = st.columns(2)
+    with bridge_col1:
+        if is_equity_ticker(info):
+            if st.button(
+                "Simular Valoración Integral",
+                type="primary",
+                width="stretch",
+                key="btn_valuation_bridge",
+            ):
+                st.session_state["selected_ticker"] = ticker_input.upper()
+                navigate_to_module("valuation")
+                st.rerun()
+        else:
+            st.caption(
+                "La valoración DCF solo está disponible para **acciones** (equity)."
+            )
+    with bridge_col2:
         if st.button(
-            "⚙️ Simular Valoración Integral",
+            "Abrir en Sandbox Quant",
             type="primary",
             width="stretch",
-            key="btn_valuation_bridge",
+            key="btn_sandbox_bridge",
         ):
-            st.session_state["selected_ticker"] = ticker_input.upper()
-            navigate_to_module("valuation")
+            st.session_state["sandbox_ticker"] = ticker_input.upper()
+            navigate_to_module("sandbox")
             st.rerun()
-    else:
-        st.caption(
-            "La valoración DCF solo está disponible para **acciones** (equity). "
-            "Este instrumento no califica."
-        )
 
     prev_c = _info_float(info, "previousClose", "regularMarketPreviousClose")
     open_p = _info_float(info, "open", "regularMarketOpen")
@@ -226,31 +245,45 @@ def render() -> None:
                             high=ohlcv["High"],
                             low=ohlcv["Low"],
                             close=ohlcv["Close"],
-                            increasing_line_color=EMERALD,
-                            increasing_fillcolor=EMERALD,
-                            decreasing_line_color=RUBY,
-                            decreasing_fillcolor=RUBY,
+                            increasing_line_color=CHART_UP,
+                            increasing_fillcolor=CHART_UP,
+                            decreasing_line_color=CHART_DOWN,
+                            decreasing_fillcolor=CHART_DOWN,
                             name=ticker_input.upper(),
                         )
                     ]
                 )
                 fig.update_layout(
                     title=f"{ticker_input.upper()} — {tf}",
-                    template="plotly_dark",
+                    template="plotly_white",
                     height=480,
                     margin=dict(l=10, r=10, t=44, b=10),
-                    paper_bgcolor="rgba(15,23,42,0.55)",
-                    plot_bgcolor="rgba(15,23,42,0.3)",
+                    paper_bgcolor=BG_CARD,
+                    plot_bgcolor=BG_BASE,
                     xaxis_rangeslider_visible=False,
-                    font=dict(color="#e2e8f0"),
+                    font=dict(color=TEXT_MAIN, size=12),
                     yaxis=dict(
                         side="right",
                         showgrid=True,
-                        gridcolor="rgba(148,163,184,0.12)",
+                        gridcolor="rgba(73, 70, 70, 0.1)",
+                        gridwidth=1,
+                        linecolor=BORDER_SUBTLE,
+                        tickfont=dict(color=TEXT_MAIN),
                     ),
-                    xaxis=dict(showgrid=False),
+                    xaxis=dict(
+                        showgrid=True,
+                        gridcolor="rgba(73, 70, 70, 0.08)",
+                        gridwidth=1,
+                        linecolor=BORDER_SUBTLE,
+                        tickfont=dict(color=TEXT_MAIN),
+                    ),
+                    modebar=dict(
+                        bgcolor="rgba(255, 255, 255, 0.96)",
+                        color=TEXT_MAIN,
+                        activecolor=GOLD_DARK,
+                    ),
                 )
-                st.plotly_chart(fig, width="stretch")
+                st.plotly_chart(fig, width="stretch", config=PLOTLY_CHART_CONFIG)
 
     with right:
         with st.container(border=True):
