@@ -8,7 +8,7 @@ from __future__ import annotations
 import streamlit as st
 
 from modules import data_export, market_monitor, ml_predictor, sandbox_quant, valuation
-from utils.sidebar_nav import render_sidebar
+from utils.sidebar_nav import apply_pending_navigation, render_sidebar
 from utils.styles import inject_global_styles
 
 st.set_page_config(
@@ -21,6 +21,7 @@ st.set_page_config(
 
 def main() -> None:
     inject_global_styles()
+    apply_pending_navigation()
     active = render_sidebar()
     match active:
         case "market":

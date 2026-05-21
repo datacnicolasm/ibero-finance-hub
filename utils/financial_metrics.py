@@ -27,7 +27,33 @@ def cost_of_equity(
     Returns:
         Cost of equity as a decimal.
     """
-    re = float(risk_free_rate) + float(equity_beta) * float(market_risk_premium)
+    return cost_of_equity_capm(
+        risk_free_rate, equity_beta, market_risk_premium, country_risk_premium=0.0
+    )
+
+
+def cost_of_equity_capm(
+    risk_free_rate: float,
+    equity_beta: float,
+    market_risk_premium: float,
+    country_risk_premium: float = 0.0,
+) -> float:
+    """CAPM with country risk: Ke = Rf + Beta * ERP + Alpha_cr.
+
+    Args:
+        risk_free_rate: Risk-free rate (decimal).
+        equity_beta: Levered beta.
+        market_risk_premium: Market risk premium (Rm - Rf).
+        country_risk_premium: Country risk spread (Alpha_cr).
+
+    Returns:
+        Cost of equity as a decimal.
+    """
+    re = (
+        float(risk_free_rate)
+        + float(equity_beta) * float(market_risk_premium)
+        + float(country_risk_premium)
+    )
     return float(_q(re, "0.0001"))
 
 
@@ -71,6 +97,128 @@ def compute_wacc(
     w_d = d / v
     wacc = w_e * float(cost_of_equity_val) + w_d * float(cost_of_debt_after_tax_val)
     return float(_q(wacc, "0.0001"))
+
+
+def compute_wacc_standard(
+    market_value_equity: float,
+    market_value_debt: float,
+    cost_of_equity_val: float,
+    nominal_cost_of_debt: float,
+    tax_rate: float,
+) -> float:
+    """WACC: Ke * (E/V) + Kd * (1 - T) * (D/V).
+
+    Args:
+        market_value_equity: Market value of equity E.
+        market_value_debt: Market value of debt D.
+        cost_of_equity_val: Ke (decimal).
+        nominal_cost_of_debt: Kd pre-tax (decimal).
+        tax_rate: Corporate tax rate T (decimal).
+
+    Returns:
+        WACC as decimal.
+    """
+    kd_at = cost_of_debt_after_tax(nominal_cost_of_debt, tax_rate)
+    return compute_wacc(
+        market_value_equity,
+        market_value_debt,
+        cost_of_equity_val,
+        kd_at,
+    )
+
+
+def project_fcf_years(
+    base_fcf: float,
+    growth_rate: float,
+    years: int = 5,
+) -> list[float]:
+    """Project free cash flows with constant growth from base year 0.
+
+    Args:
+        base_fcf: Last observed or normalized FCF (year 0 reference).
+        growth_rate: Annual growth applied to each forward year.
+        years: Number of explicit forecast years.
+
+    Returns:
+        List of FCF for years 1..years.
+    """
+    if years <= 0 or base_fcf <= 0:
+        return []
+    g = float(growth_rate)
+    b = float(base_fcf)
+    return [b * ((1.0 + g) ** i) for i in range(1, years + 1)]
+
+
+def dcf_schedule(
+    free_cash_flows: list[float],
+    wacc: float,
+    terminal_growth: float,
+    net_debt: float,
+    shares_outstanding: float,
+) -> dict[str, float | list[float] | list[str]]:
+    """DCF with explicit years plus Gordon terminal value; chart-friendly output.
+
+    Args:
+        free_cash_flows: FCF years 1..N.
+        wacc: Discount rate (decimal).
+        terminal_growth: Perpetual growth g (decimal).
+        net_debt: Net debt to subtract from EV.
+        shares_outstanding: Shares for per-share value.
+
+    Returns:
+        Dict with enterprise_value, equity_value, value_per_share, pv_explicit,
+        pv_terminal, chart_labels, chart_fcf, chart_pv.
+    """
+    core = dcf_equity_value_one_stage(
+        free_cash_flows, wacc, terminal_growth, net_debt, shares_outstanding
+    )
+    w = float(wacc)
+    g = float(terminal_growth)
+    fcf = [float(x) for x in free_cash_flows]
+    empty: dict[str, float | list[float] | list[str] | bool] = {
+        "enterprise_value": 0.0,
+        "equity_value": 0.0,
+        "value_per_share": 0.0,
+        "pv_explicit": 0.0,
+        "pv_terminal": 0.0,
+        "chart_labels": [],
+        "chart_fcf": [],
+        "chart_pv": [],
+        "valid": False,
+    }
+    if not fcf:
+        return empty
+    if w <= g:
+        empty["wacc_le_g"] = True
+        return empty
+
+    pv_by_year: list[float] = []
+    pv_explicit = 0.0
+    for i, cf in enumerate(fcf, start=1):
+        pv_i = cf / ((1.0 + w) ** i)
+        pv_by_year.append(float(_q(pv_i, "0.01")))
+        pv_explicit += pv_i
+
+    fcf_n = fcf[-1]
+    tv = fcf_n * (1.0 + g) / (w - g)
+    n = len(fcf)
+    pv_tv = tv / ((1.0 + w) ** n)
+
+    labels = [f"Año {i}" for i in range(1, n + 1)] + ["Terminal"]
+    chart_fcf = fcf + [float(tv)]
+    chart_pv = pv_by_year + [float(_q(pv_tv, "0.01"))]
+
+    return {
+        "enterprise_value": core["enterprise_value"],
+        "equity_value": core["equity_value"],
+        "value_per_share": core["value_per_share"],
+        "pv_explicit": float(_q(pv_explicit, "0.01")),
+        "pv_terminal": float(_q(pv_tv, "0.01")),
+        "chart_labels": labels,
+        "chart_fcf": chart_fcf,
+        "chart_pv": chart_pv,
+        "valid": True,
+    }
 
 
 def dcf_equity_value_one_stage(

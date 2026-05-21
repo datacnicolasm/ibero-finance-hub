@@ -12,7 +12,9 @@ from utils.data_engine import (
     fetch_market_snapshot,
     fetch_ohlcv_timeframe,
     fetch_ticker_info,
+    is_equity_ticker,
 )
+from utils.sidebar_nav import navigate_to_module
 from utils.styles import EMERALD, RUBY
 
 _TIMEFRAME_LABELS: tuple[str, ...] = ("1D", "5D", "1M", "6M", "YTD", "1Y", "MAX")
@@ -170,6 +172,22 @@ def render() -> None:
                 help="Price × shares out.",
             )
 
+    if is_equity_ticker(info):
+        if st.button(
+            "⚙️ Simular Valoración Integral",
+            type="primary",
+            width="stretch",
+            key="btn_valuation_bridge",
+        ):
+            st.session_state["selected_ticker"] = ticker_input.upper()
+            navigate_to_module("valuation")
+            st.rerun()
+    else:
+        st.caption(
+            "La valoración DCF solo está disponible para **acciones** (equity). "
+            "Este instrumento no califica."
+        )
+
     prev_c = _info_float(info, "previousClose", "regularMarketPreviousClose")
     open_p = _info_float(info, "open", "regularMarketOpen")
     vol = _info_float(info, "volume", "regularMarketVolume")
@@ -232,7 +250,7 @@ def render() -> None:
                     ),
                     xaxis=dict(showgrid=False),
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
     with right:
         with st.container(border=True):
@@ -268,7 +286,7 @@ def render() -> None:
             )
             st.dataframe(
                 styled,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "Métrica": st.column_config.TextColumn(
