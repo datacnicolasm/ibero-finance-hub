@@ -54,11 +54,30 @@ class SandboxRunResult:
 
 
 def _make_local_context(sandbox_data: dict[str, Any]) -> dict[str, Any]:
-    return {
+    ctx: dict[str, Any] = {
         "data": sandbox_data,
         "pd": pd,
         "np": np,
     }
+    try:
+        from sklearn.linear_model import LinearRegression
+        from sklearn.neural_network import MLPRegressor
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.tree import DecisionTreeRegressor
+
+        ctx.update(
+            {
+                "LinearRegression": LinearRegression,
+                "DecisionTreeRegressor": DecisionTreeRegressor,
+                "MLPRegressor": MLPRegressor,
+                "Pipeline": Pipeline,
+                "StandardScaler": StandardScaler,
+            }
+        )
+    except ImportError:
+        pass
+    return ctx
 
 
 def _exec_cell_code(

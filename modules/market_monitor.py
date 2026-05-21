@@ -180,7 +180,7 @@ def render() -> None:
                 help="Price × shares out.",
             )
 
-    bridge_col1, bridge_col2 = st.columns(2)
+    bridge_col1, bridge_col2, bridge_col3 = st.columns(3)
     with bridge_col1:
         if is_equity_ticker(info):
             if st.button(
@@ -205,6 +205,16 @@ def render() -> None:
         ):
             st.session_state["sandbox_ticker"] = ticker_input.upper()
             navigate_to_module("sandbox")
+            st.rerun()
+    with bridge_col3:
+        if st.button(
+            "Modelar Tendencias con ML",
+            type="primary",
+            width="stretch",
+            key="btn_ml_bridge",
+        ):
+            st.session_state["ml_ticker"] = ticker_input.upper()
+            navigate_to_module("ml")
             st.rerun()
 
     prev_c = _info_float(info, "previousClose", "regularMarketPreviousClose")

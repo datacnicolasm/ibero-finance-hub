@@ -571,3 +571,99 @@ def fetch_sandbox_data(ticker_symbol: str) -> dict[str, Any]:
             "income_statement_period": is_period,
         },
     }
+
+
+def _is_colombian_listing(symbol: str) -> bool:
+    """True for Colombian listings on Yahoo (e.g. ``ECOPETROL.CB``)."""
+    return (symbol or "").strip().upper().endswith(".CB")
+
+
+def _fetch_macro_close_series(
+    macro_ticker: str,
+    period: str,
+) -> pd.Series:
+    """Download adjusted close for a macro Yahoo symbol; empty series on failure."""
+    try:
+        hist = yf.Ticker(macro_ticker).history(
+            period=period,
+            auto_adjust=True,
+            actions=False,
+        )
+        if hist is None or hist.empty or "Close" not in hist.columns:
+            return pd.Series(dtype=float)
+        s = pd.to_numeric(hist["Close"], errors="coerce").dropna()
+        idx = pd.to_datetime(s.index)
+        if getattr(idx, "tz", None) is not None:
+            idx = idx.tz_convert(None)
+        s.index = idx
+        return s.sort_index()
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+@st.cache_data(show_spinner=False)
+def fetch_ml_historical_data(
+    ticker_symbol: str,
+    years: int,
+    include_macro: bool,
+) -> pd.DataFrame:
+    """Build aligned ML training features: asset close plus optional macro series.
+
+    Args:
+        ticker_symbol: Yahoo Finance symbol for the asset under study.
+        years: Training history length (1–10), mapped to yfinance period.
+        include_macro: If True, merge Brent oil; add USD/COP for ``.CB`` listings.
+
+    Returns:
+        DataFrame indexed by date with ``close``, ``volume``, and optional ``brent``,
+        ``usd_cop``.
+    """
+    symbol = (ticker_symbol or "").strip().upper()
+    if not symbol:
+        return pd.DataFrame()
+
+    yrs = max(1, min(10, int(years)))
+    period = f"{yrs}y"
+
+    try:
+        hist = yf.Ticker(symbol).history(
+            period=period,
+            auto_adjust=True,
+            actions=False,
+        )
+    except Exception:
+        return pd.DataFrame()
+
+    if hist is None or hist.empty or "Close" not in hist.columns:
+        return pd.DataFrame()
+
+    idx = pd.to_datetime(hist.index)
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_convert(None)
+    vol_col = (
+        pd.to_numeric(hist["Volume"], errors="coerce")
+        if "Volume" in hist.columns
+        else pd.Series(0.0, index=idx)
+    )
+    out = pd.DataFrame(
+        {
+            "close": pd.to_numeric(hist["Close"], errors="coerce"),
+            "volume": vol_col,
+        },
+        index=idx,
+    )
+    out = out.sort_index()
+
+    if include_macro:
+        brent = _fetch_macro_close_series("BZ=F", period)
+        if not brent.empty:
+            out = out.join(brent.rename("brent"), how="outer")
+
+        if _is_colombian_listing(symbol):
+            usd_cop = _fetch_macro_close_series("COP=X", period)
+            if not usd_cop.empty:
+                out = out.join(usd_cop.rename("usd_cop"), how="outer")
+
+    out = out.sort_index().ffill().bfill()
+    out = out.dropna(subset=["close"])
+    return out
