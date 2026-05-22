@@ -18,4 +18,9 @@ borderColor = "#d19e40"
 
 [server]
 headless = true
-baseUrlPath = "ibero-finance-hub"
+
+# Streamlit Community Cloud: NO definir baseUrlPath (el health check usa /_stcore/health en la raíz).
+# Subdominio público: configurar en el panel de Cloud (ej. mi-app.streamlit.app).
+#
+# Solo para reverse-proxy local con subpath (nginx), en una copia local NO versionada:
+# baseUrlPath = "ibero-finance-hub"

@@ -15,4 +15,3 @@ borderColor = "#d19e40"
 
 [server]
 headless = true
-baseUrlPath = "ibero-finance-hub"
