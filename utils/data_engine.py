@@ -7,11 +7,66 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from curl_cffi import requests as curl_requests
+
 logger = logging.getLogger(__name__)
 
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+
+_YF_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+
+def _get_yf_session() -> curl_requests.Session:
+    """curl_cffi session with browser User-Agent (required by yfinance 1.3+)."""
+    session = curl_requests.Session()
+    session.headers.update({"User-Agent": _YF_USER_AGENT})
+    return session
+
+
+def _yf_ticker(symbol: str) -> yf.Ticker:
+    """Yahoo ``Ticker`` bound to the shared anti-blocking session."""
+    return yf.Ticker((symbol or "").strip().upper(), session=_get_yf_session())
+
+
+def _fetch_ticker_info_with_retry(symbol: str) -> dict[str, Any]:
+    """Fetch ``Ticker.info`` with retries; raise if Yahoo returns empty metadata."""
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        raise ValueError("Símbolo vacío.")
+
+    max_retries = 3
+    session = _get_yf_session()
+    info: dict[str, Any] = {}
+    last_exception: Exception | None = None
+
+    for attempt in range(max_retries):
+        try:
+            info = yf.Ticker(sym, session=session).info or {}
+            if info and "shortName" in info:
+                return info
+        except Exception as exc:
+            last_exception = exc
+            logger.warning(
+                "fetch ticker info attempt %s/%s failed for %s: %s",
+                attempt + 1,
+                max_retries,
+                sym,
+                exc,
+            )
+        if attempt < max_retries - 1:
+            time.sleep(1)
+
+    error_msg = (
+        f"Fallo al descargar metadatos de {sym}. Posible bloqueo de IP en producción."
+    )
+    if last_exception:
+        error_msg += f" Error interno: {last_exception}"
+    raise ValueError(error_msg)
 
 NON_EQUITY_QUOTE_TYPES: frozenset[str] = frozenset(
     {
@@ -109,8 +164,7 @@ def fetch_ohlcv(ticker: str, period: str = "6mo") -> pd.DataFrame:
     symbol = (ticker or "").strip().upper()
     if not symbol:
         return pd.DataFrame()
-    t = yf.Ticker(symbol)
-    hist = t.history(period=period, auto_adjust=False, actions=False)
+    hist = _yf_ticker(symbol).history(period=period, auto_adjust=False, actions=False)
     return clean_ohlcv(hist)
 
 
@@ -129,7 +183,7 @@ def fetch_ohlcv_timeframe(ticker: str, timeframe: str) -> pd.DataFrame:
     if not symbol:
         return pd.DataFrame()
     period, interval = TIMEFRAME_TO_HISTORY.get(timeframe, ("6mo", "1d"))
-    t = yf.Ticker(symbol)
+    t = _yf_ticker(symbol)
     try:
         hist = t.history(
             period=period, interval=interval, auto_adjust=False, actions=False
@@ -148,14 +202,12 @@ def fetch_ohlcv_timeframe(ticker: str, timeframe: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def fetch_ticker_info(ticker: str) -> dict[str, Any]:
-    """Full ``Ticker.info`` dict (cached; fields vary by listing)."""
-    symbol = (ticker or "").strip().upper()
-    if not symbol:
-        return {}
-    try:
-        return yf.Ticker(symbol).info or {}
-    except Exception:
-        return {}
+    """Full ``Ticker.info`` dict (cached; fields vary by listing).
+
+    Raises:
+        ValueError: If Yahoo returns empty metadata (e.g. cloud IP block).
+    """
+    return _fetch_ticker_info_with_retry(ticker)
 
 
 @st.cache_data(show_spinner=False)
@@ -165,7 +217,7 @@ def fetch_ticker_news(ticker: str, limit: int = 5) -> list[dict[str, Any]]:
     if not symbol:
         return []
     try:
-        raw = yf.Ticker(symbol).news or []
+        raw = _yf_ticker(symbol).news or []
     except Exception:
         return []
     if not isinstance(raw, list):
@@ -318,7 +370,7 @@ def fetch_market_snapshot(ticker: str) -> dict[str, Any]:
     }
     if not symbol:
         return result
-    t = yf.Ticker(symbol)
+    t = _yf_ticker(symbol)
     hist = t.history(period="5d", auto_adjust=False, actions=False)
     hist = clean_ohlcv(hist)
     if not hist.empty and "Close" in hist.columns:
@@ -330,11 +382,7 @@ def fetch_market_snapshot(ticker: str) -> dict[str, Any]:
         elif len(closes) == 1:
             result["prev_close"] = result["last_price"]
 
-    info: dict[str, Any] = {}
-    try:
-        info = t.info or {}
-    except Exception:
-        info = {}
+    info = fetch_ticker_info(symbol)
 
     mc = _safe_float(info.get("marketCap"))
     if mc is None:
@@ -394,7 +442,7 @@ def is_equity_ticker(info: dict[str, Any]) -> bool:
 def fetch_risk_free_rate() -> float:
     """10Y US Treasury yield (^TNX) as decimal; fallback 4% if unavailable."""
     try:
-        hist = yf.Ticker("^TNX").history(period="5d", auto_adjust=False)
+        hist = _yf_ticker("^TNX").history(period="5d", auto_adjust=False)
         if not hist.empty and "Close" in hist.columns:
             yld = _safe_float(hist["Close"].dropna().iloc[-1])
             if yld is not None and yld > 0:
@@ -507,7 +555,7 @@ def _maybe_rescale_fcf(fcf: float, market_cap: float) -> float:
 def _fcf_raw_from_cashflow(ticker: str) -> Optional[float]:
     """Latest free cash flow in financial-statement currency (no FX)."""
     try:
-        cf = yf.Ticker(ticker.strip().upper()).cashflow
+        cf = _yf_ticker(ticker).cashflow
         if cf is None or cf.empty:
             return None
         for label in ("Free Cash Flow", "FreeCashFlow"):
@@ -776,7 +824,7 @@ def _statement_latest_value(df: pd.DataFrame, row_aliases: tuple[str, ...]) -> O
 
 def _load_balance_sheet(ticker: str) -> tuple[pd.DataFrame, str]:
     """Load balance sheet; prefer quarterly with annual fallback."""
-    t = yf.Ticker(ticker.strip().upper())
+    t = _yf_ticker(ticker)
     try:
         q = t.quarterly_balance_sheet
         if q is not None and not q.empty:
@@ -794,7 +842,7 @@ def _load_balance_sheet(ticker: str) -> tuple[pd.DataFrame, str]:
 
 def _load_income_statement(ticker: str) -> tuple[pd.DataFrame, str]:
     """Load income statement; prefer quarterly with annual fallback."""
-    t = yf.Ticker(ticker.strip().upper())
+    t = _yf_ticker(ticker)
     try:
         q = t.quarterly_financials
         if q is not None and not q.empty:
@@ -978,7 +1026,7 @@ def _fetch_portfolio_series_cached(
     failed: list[str] = []
     for symbol in tickers:
         try:
-            hist = yf.Ticker(symbol).history(
+            hist = _yf_ticker(symbol).history(
                 period="5y",
                 auto_adjust=False,
                 actions=False,
@@ -1026,7 +1074,7 @@ def _fetch_macro_close_series(
 ) -> pd.Series:
     """Download adjusted close for a macro Yahoo symbol; empty series on failure."""
     try:
-        hist = yf.Ticker(macro_ticker).history(
+        hist = _yf_ticker(macro_ticker).history(
             period=period,
             auto_adjust=True,
             actions=False,
@@ -1073,7 +1121,7 @@ def fetch_ml_historical_data(
 
     for attempt in range(max_retries):
         try:
-            hist = yf.Ticker(symbol).history(
+            hist = _yf_ticker(symbol).history(
                 period=period,
                 auto_adjust=True,
                 actions=False,
