@@ -10,9 +10,8 @@ import streamlit as st
 
 from utils.data_engine import (
     TIMEFRAME_TO_HISTORY,
-    fetch_market_snapshot,
     fetch_ohlcv_timeframe,
-    fetch_ticker_info,
+    fetch_market_panel,
     get_asset_class_label,
     is_equity_ticker,
 )
@@ -541,8 +540,9 @@ def render() -> None:
                 st.info("Ingresa un ticker para ver la cotización.")
         else:
             try:
-                info = fetch_ticker_info(ticker_input)
-                snap = fetch_market_snapshot(ticker_input)
+                panel = fetch_market_panel(ticker_input)
+                info = panel["info"]
+                snap = panel["snapshot"]
             except Exception as exc:
                 with col_quote:
                     st.error(

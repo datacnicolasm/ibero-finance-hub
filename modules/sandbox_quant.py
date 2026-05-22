@@ -669,7 +669,7 @@ def _render_notebook_cell(
                 _render_cell_output(cell, cell_index + 1)
 
 
-_KEYBOARD_RUN_BRIDGE_HTML = """
+_KEYBOARD_RUN_BRIDGE_HTML = r"""
 <html><head><style>html,body{margin:0;padding:0;height:0;overflow:hidden;}</style></head>
 <body>
 <div data-ibero-bridge="keyboard-run" hidden aria-hidden="true"></div>

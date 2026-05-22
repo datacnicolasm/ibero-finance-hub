@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -19,13 +20,23 @@ _YF_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+_YF_SESSION: curl_requests.Session | None = None
+_YF_CACHE_TTL = 3600
+_YF_MAX_RETRIES = 4
+_YAHOO_RATE_LIMIT_USER_MSG = (
+    "El servidor de datos (Yahoo Finance) está experimentando alto tráfico "
+    "(Rate Limit). Los datos mostrados pueden estar incompletos. Por favor, "
+    "intente con otro activo o espere unos minutos."
+)
 
 
 def _get_yf_session() -> curl_requests.Session:
-    """curl_cffi session with browser User-Agent (required by yfinance 1.3+)."""
-    session = curl_requests.Session()
-    session.headers.update({"User-Agent": _YF_USER_AGENT})
-    return session
+    """Reused curl_cffi session (yfinance 1.3+) with browser User-Agent."""
+    global _YF_SESSION
+    if _YF_SESSION is None:
+        _YF_SESSION = curl_requests.Session()
+        _YF_SESSION.headers.update({"User-Agent": _YF_USER_AGENT})
+    return _YF_SESSION
 
 
 def _yf_ticker(symbol: str) -> yf.Ticker:
@@ -33,40 +44,220 @@ def _yf_ticker(symbol: str) -> yf.Ticker:
     return yf.Ticker((symbol or "").strip().upper(), session=_get_yf_session())
 
 
-def _fetch_ticker_info_with_retry(symbol: str) -> dict[str, Any]:
-    """Fetch ``Ticker.info`` with retries; raise if Yahoo returns empty metadata."""
+def _is_rate_limited(exc: BaseException | str | None) -> bool:
+    msg = str(exc or "").lower()
+    return "too many requests" in msg or "rate limit" in msg
+
+
+def _yf_backoff_sleep(attempt: int, exc: BaseException | None = None) -> None:
+    """Exponential backoff with jitter between Yahoo API retries."""
+    delay = (2**attempt) + random.uniform(0, 1)
+    if exc is not None and not _is_rate_limited(exc):
+        delay = min(delay, 4.0)
+    time.sleep(min(60.0, delay))
+
+
+def _yahoo_fetch_error_message(
+    symbol: str,
+    *,
+    last_exception: BaseException | None = None,
+    context: str = "metadatos",
+) -> str:
+    sym = symbol.strip().upper()
+    if last_exception is not None and _is_rate_limited(last_exception):
+        return f"{_YAHOO_RATE_LIMIT_USER_MSG} ({context}: {sym})."
+    msg = (
+        f"Fallo al descargar {context} de {sym} tras {_YF_MAX_RETRIES} intentos."
+    )
+    if last_exception is not None:
+        msg += f" Detalle: {last_exception}"
+    return msg
+
+
+def _fetch_history_with_retry(
+    symbol: str,
+    **history_kwargs: Any,
+) -> tuple[pd.DataFrame, BaseException | None]:
+    """OHLCV history with exponential backoff + jitter on Yahoo failures."""
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return pd.DataFrame(), None
+    last_exc: BaseException | None = None
+    for attempt in range(_YF_MAX_RETRIES):
+        try:
+            raw = _yf_ticker(sym).history(**history_kwargs)
+            if raw is not None and not raw.empty:
+                return raw, None
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "history attempt %s/%s failed for %s: %s",
+                attempt + 1,
+                _YF_MAX_RETRIES,
+                sym,
+                exc,
+            )
+            if attempt < _YF_MAX_RETRIES - 1:
+                _yf_backoff_sleep(attempt, exc)
+    return pd.DataFrame(), last_exc
+
+
+def _info_has_metadata(info: dict[str, Any] | None) -> bool:
+    if not info:
+        return False
+    if info.get("shortName"):
+        return True
+    if info.get("longName") and (
+        info.get("symbol")
+        or info.get("regularMarketPrice")
+        or info.get("currentPrice")
+    ):
+        return True
+    return False
+
+
+def _info_from_fast_info(ticker_obj: yf.Ticker, symbol: str) -> dict[str, Any]:
+    """Lightweight metadata when full ``.info`` is rate-limited."""
+    try:
+        raw = dict(ticker_obj.fast_info)
+    except Exception:
+        return {}
+    if not raw:
+        return {}
+
+    last_price = _safe_float(raw.get("lastPrice") or raw.get("last_price"))
+    prev_close = _safe_float(
+        raw.get("previousClose")
+        or raw.get("regularMarketPreviousClose")
+        or raw.get("previous_close")
+    )
+    market_cap = _safe_float(raw.get("marketCap") or raw.get("market_cap"))
+    quote_type = str(raw.get("quoteType") or raw.get("quote_type") or "").strip()
+
+    out: dict[str, Any] = {
+        "symbol": symbol,
+        "shortName": symbol,
+        "longName": symbol,
+        "quoteType": quote_type or None,
+        "currency": raw.get("currency"),
+        "exchange": raw.get("exchange"),
+        "currentPrice": last_price,
+        "regularMarketPrice": last_price,
+        "previousClose": prev_close,
+        "regularMarketPreviousClose": prev_close,
+        "marketCap": market_cap,
+    }
+    shares = _safe_float(raw.get("shares"))
+    if shares is not None:
+        out["sharesOutstanding"] = shares
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _info_sufficient_for_ui(info: dict[str, Any] | None) -> bool:
+    """True when the UI can show a quote without calling ``Ticker.info`` again."""
+    if not _info_has_metadata(info):
+        return False
+    price = _safe_float(
+        (info or {}).get("currentPrice") or (info or {}).get("regularMarketPrice")
+    )
+    return price is not None
+
+
+def _enrich_info_from_history(
+    info: dict[str, Any],
+    hist: pd.DataFrame,
+) -> dict[str, Any]:
+    """Fill price fields from OHLCV when Yahoo metadata endpoints are rate-limited."""
+    out = dict(info or {})
+    if hist is None or hist.empty or "Close" not in hist.columns:
+        return out
+    closes = hist["Close"].dropna()
+    if len(closes) >= 1:
+        last = _safe_float(closes.iloc[-1])
+        if last is not None:
+            out["currentPrice"] = last
+            out["regularMarketPrice"] = last
+    if len(closes) >= 2:
+        prev = _safe_float(closes.iloc[-2])
+        if prev is not None:
+            out["previousClose"] = prev
+            out["regularMarketPreviousClose"] = prev
+    elif out.get("currentPrice") is not None:
+        out["previousClose"] = out["currentPrice"]
+        out["regularMarketPreviousClose"] = out["currentPrice"]
+    return out
+
+
+def _fetch_ticker_info_with_retry(
+    symbol: str,
+    *,
+    ticker_obj: yf.Ticker | None = None,
+    hist: pd.DataFrame | None = None,
+) -> dict[str, Any]:
+    """Metadata via fast_info + history first; at most one ``.info`` call if needed."""
     sym = (symbol or "").strip().upper()
     if not sym:
         raise ValueError("Símbolo vacío.")
 
-    max_retries = 3
-    session = _get_yf_session()
-    info: dict[str, Any] = {}
-    last_exception: Exception | None = None
+    t = ticker_obj or _yf_ticker(sym)
+    hist_df = hist if hist is not None else pd.DataFrame()
+    if hist_df.empty:
+        raw_hist, _ = _fetch_history_with_retry(
+            sym, period="5d", auto_adjust=False, actions=False
+        )
+        hist_df = clean_ohlcv(raw_hist)
 
-    for attempt in range(max_retries):
+    last_exception: Exception | None = None
+    degraded: dict[str, Any] = {}
+
+    for attempt in range(3):
         try:
-            info = yf.Ticker(sym, session=session).info or {}
-            if info and "shortName" in info:
-                return info
+            fast = _info_from_fast_info(t, sym)
+            degraded = _enrich_info_from_history(fast, hist_df)
+            if _info_sufficient_for_ui(degraded):
+                return degraded
         except Exception as exc:
             last_exception = exc
             logger.warning(
-                "fetch ticker info attempt %s/%s failed for %s: %s",
+                "fast_info failed for %s (attempt %s/3): %s",
+                sym,
                 attempt + 1,
-                max_retries,
+                exc,
+            )
+            if attempt < 2:
+                _yf_backoff_sleep(attempt, exc)
+            continue
+        if attempt < 2 and not _info_sufficient_for_ui(degraded):
+            _yf_backoff_sleep(attempt)
+
+    try:
+        full = t.info or {}
+        if _info_has_metadata(full):
+            merged = {**degraded, **{k: v for k, v in full.items() if v is not None}}
+            merged = _enrich_info_from_history(merged, hist_df)
+            return merged
+    except Exception as exc:
+        last_exception = exc
+        if _is_rate_limited(exc):
+            logger.warning(
+                "Skipping further .info retries for %s after rate limit: %s",
                 sym,
                 exc,
             )
-        if attempt < max_retries - 1:
-            time.sleep(1)
+            if _info_sufficient_for_ui(degraded):
+                return degraded
+            degraded = _enrich_info_from_history(_info_from_fast_info(t, sym), hist_df)
+            if _info_sufficient_for_ui(degraded):
+                logger.info("Using degraded metadata (history) for %s", sym)
+                return degraded
 
-    error_msg = (
-        f"Fallo al descargar metadatos de {sym}. Posible bloqueo de IP en producción."
+    if _info_sufficient_for_ui(degraded):
+        return degraded
+
+    raise ValueError(
+        _yahoo_fetch_error_message(sym, last_exception=last_exception, context="metadatos")
     )
-    if last_exception:
-        error_msg += f" Error interno: {last_exception}"
-    raise ValueError(error_msg)
+
 
 NON_EQUITY_QUOTE_TYPES: frozenset[str] = frozenset(
     {
@@ -150,7 +341,7 @@ def clean_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=_YF_CACHE_TTL, show_spinner=False)
 def fetch_ohlcv(ticker: str, period: str = "6mo") -> pd.DataFrame:
     """Download historical OHLCV for a Yahoo Finance symbol.
 
@@ -164,11 +355,13 @@ def fetch_ohlcv(ticker: str, period: str = "6mo") -> pd.DataFrame:
     symbol = (ticker or "").strip().upper()
     if not symbol:
         return pd.DataFrame()
-    hist = _yf_ticker(symbol).history(period=period, auto_adjust=False, actions=False)
+    hist, _ = _fetch_history_with_retry(
+        symbol, period=period, auto_adjust=False, actions=False
+    )
     return clean_ohlcv(hist)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=_YF_CACHE_TTL, show_spinner=False)
 def fetch_ohlcv_timeframe(ticker: str, timeframe: str) -> pd.DataFrame:
     """OHLCV for a UI timeframe preset (period + interval tuned for chart density).
 
@@ -183,31 +376,37 @@ def fetch_ohlcv_timeframe(ticker: str, timeframe: str) -> pd.DataFrame:
     if not symbol:
         return pd.DataFrame()
     period, interval = TIMEFRAME_TO_HISTORY.get(timeframe, ("6mo", "1d"))
-    t = _yf_ticker(symbol)
-    try:
-        hist = t.history(
-            period=period, interval=interval, auto_adjust=False, actions=False
-        )
-    except Exception:
-        return pd.DataFrame()
+    hist, _ = _fetch_history_with_retry(
+        symbol,
+        period=period,
+        interval=interval,
+        auto_adjust=False,
+        actions=False,
+    )
     out = clean_ohlcv(hist)
     if out.empty and timeframe == "1D":
-        try:
-            hist = t.history(period="5d", interval="1d", auto_adjust=False, actions=False)
-            out = clean_ohlcv(hist)
-        except Exception:
-            return pd.DataFrame()
+        hist, _ = _fetch_history_with_retry(
+            symbol,
+            period="5d",
+            interval="1d",
+            auto_adjust=False,
+            actions=False,
+        )
+        out = clean_ohlcv(hist)
     return out
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=_YF_CACHE_TTL, show_spinner=False)
 def fetch_ticker_info(ticker: str) -> dict[str, Any]:
     """Full ``Ticker.info`` dict (cached; fields vary by listing).
 
     Raises:
         ValueError: If Yahoo returns empty metadata (e.g. cloud IP block).
     """
-    return _fetch_ticker_info_with_retry(ticker)
+    symbol = (ticker or "").strip().upper()
+    if not symbol:
+        raise ValueError("Símbolo vacío.")
+    return _fetch_market_panel_cached(symbol)["info"]
 
 
 @st.cache_data(show_spinner=False)
@@ -348,7 +547,74 @@ def get_asset_class_label(info: dict[str, Any] | None) -> tuple[str, str]:
     return _ASSET_CLASS_MAP.get(raw_type, _DEFAULT_ASSET_CLASS)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=_YF_CACHE_TTL, show_spinner=False)
+def _fetch_market_panel_cached(ticker: str) -> dict[str, Any]:
+    """One Yahoo burst per ticker: ``info`` + snapshot (reduces duplicate API calls)."""
+    symbol = (ticker or "").strip().upper()
+    if not symbol:
+        raise ValueError("Símbolo vacío.")
+
+    t = _yf_ticker(symbol)
+    raw_hist, _ = _fetch_history_with_retry(
+        symbol, period="5d", auto_adjust=False, actions=False
+    )
+    hist = clean_ohlcv(raw_hist)
+
+    info = _fetch_ticker_info_with_retry(symbol, ticker_obj=t, hist=hist)
+
+    snapshot: dict[str, Any] = {
+        "last_price": None,
+        "prev_close": None,
+        "market_cap": None,
+        "asset_class_label": _DEFAULT_ASSET_CLASS[0],
+        "asset_class_icon": _DEFAULT_ASSET_CLASS[1],
+        "quote_type_raw": "",
+    }
+    if not hist.empty and "Close" in hist.columns:
+        closes = hist["Close"].dropna()
+        if len(closes) >= 1:
+            snapshot["last_price"] = _safe_float(closes.iloc[-1])
+        if len(closes) >= 2:
+            snapshot["prev_close"] = _safe_float(closes.iloc[-2])
+        elif len(closes) == 1:
+            snapshot["prev_close"] = snapshot["last_price"]
+
+    mc = _safe_float(info.get("marketCap"))
+    if mc is None:
+        try:
+            fi = getattr(t, "fast_info", None)
+            if fi is not None:
+                mc = _safe_float(dict(fi).get("market_cap") or dict(fi).get("marketCap"))
+        except Exception:
+            mc = None
+    snapshot["market_cap"] = mc
+
+    if snapshot["last_price"] is None:
+        snapshot["last_price"] = _safe_float(
+            info.get("currentPrice") or info.get("regularMarketPrice")
+        )
+    if snapshot["prev_close"] is None:
+        snapshot["prev_close"] = _safe_float(
+            info.get("previousClose") or info.get("regularMarketPreviousClose")
+        )
+
+    label, icon = get_asset_class_label(info)
+    raw_type = str(info.get("quoteType") or "").strip().upper()
+    if not raw_type:
+        raw_type = _resolve_quote_type(info)
+    snapshot["asset_class_label"] = label
+    snapshot["asset_class_icon"] = icon
+    snapshot["quote_type_raw"] = raw_type
+
+    return {"info": info, "snapshot": snapshot}
+
+
+def fetch_market_panel(ticker: str) -> dict[str, Any]:
+    """Cached ``info`` + ``snapshot`` in a single Yahoo request burst."""
+    return _fetch_market_panel_cached(ticker)
+
+
+@st.cache_data(ttl=_YF_CACHE_TTL, show_spinner=False)
 def fetch_market_snapshot(ticker: str) -> dict[str, Any]:
     """Load last price, previous close, market cap, and asset-class metadata.
 
@@ -360,61 +626,16 @@ def fetch_market_snapshot(ticker: str) -> dict[str, Any]:
         ``None``), plus ``asset_class_label``, ``asset_class_icon``, ``quote_type_raw``.
     """
     symbol = (ticker or "").strip().upper()
-    result: dict[str, Any] = {
-        "last_price": None,
-        "prev_close": None,
-        "market_cap": None,
-        "asset_class_label": _DEFAULT_ASSET_CLASS[0],
-        "asset_class_icon": _DEFAULT_ASSET_CLASS[1],
-        "quote_type_raw": "",
-    }
     if not symbol:
-        return result
-    t = _yf_ticker(symbol)
-    hist = t.history(period="5d", auto_adjust=False, actions=False)
-    hist = clean_ohlcv(hist)
-    if not hist.empty and "Close" in hist.columns:
-        closes = hist["Close"].dropna()
-        if len(closes) >= 1:
-            result["last_price"] = _safe_float(closes.iloc[-1])
-        if len(closes) >= 2:
-            result["prev_close"] = _safe_float(closes.iloc[-2])
-        elif len(closes) == 1:
-            result["prev_close"] = result["last_price"]
-
-    info = fetch_ticker_info(symbol)
-
-    mc = _safe_float(info.get("marketCap"))
-    if mc is None:
-        try:
-            fi = getattr(t, "fast_info", None)
-            if fi is not None:
-                mc = _safe_float(dict(fi).get("market_cap"))
-        except Exception:
-            mc = None
-    result["market_cap"] = mc
-
-    if result["last_price"] is None:
-        lp = _safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
-        result["last_price"] = lp
-
-    if result["prev_close"] is None:
-        pc = _safe_float(
-            info.get("previousClose")
-            or info.get("regularMarketPreviousClose")
-        )
-        result["prev_close"] = pc
-
-    label, icon = get_asset_class_label(info)
-    raw_type = str(info.get("quoteType") or "").strip().upper()
-    if not raw_type:
-        raw_type = _resolve_quote_type(info)
-
-    result["asset_class_label"] = label
-    result["asset_class_icon"] = icon
-    result["quote_type_raw"] = raw_type
-
-    return result
+        return {
+            "last_price": None,
+            "prev_close": None,
+            "market_cap": None,
+            "asset_class_label": _DEFAULT_ASSET_CLASS[0],
+            "asset_class_icon": _DEFAULT_ASSET_CLASS[1],
+            "quote_type_raw": "",
+        }
+    return _fetch_market_panel_cached(symbol)["snapshot"]
 
 
 def is_equity_ticker(info: dict[str, Any]) -> bool:
@@ -631,8 +852,13 @@ def build_valuation_inputs(ticker: str, info: Optional[dict[str, Any]] = None) -
         ``ValuationInputs`` with numeric defaults where data is absent.
     """
     symbol = (ticker or "").strip().upper()
-    data = info if info is not None else fetch_ticker_info(symbol)
-    snap = fetch_market_snapshot(symbol)
+    if info is not None:
+        data = info
+        snap = fetch_market_snapshot(symbol)
+    else:
+        panel = _fetch_market_panel_cached(symbol)
+        data = panel["info"]
+        snap = panel["snapshot"]
 
     quote = _quote_currency(data)
     fin = _financial_currency(data)
@@ -935,7 +1161,7 @@ def _build_sandbox_metrics(
     }
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=_YF_CACHE_TTL, show_spinner=False)
 def fetch_sandbox_data(ticker_symbol: str) -> dict[str, Any]:
     """Consolidate market, statements and macro data for Sandbox Quant.
 
@@ -948,8 +1174,9 @@ def fetch_sandbox_data(ticker_symbol: str) -> dict[str, Any]:
         and ``sources`` metadata.
     """
     symbol = (ticker_symbol or "").strip().upper() or "AAPL"
-    info = fetch_ticker_info(symbol)
-    snap = fetch_market_snapshot(symbol)
+    panel = _fetch_market_panel_cached(symbol)
+    info = panel["info"]
+    snap = panel["snapshot"]
 
     price = _safe_float(
         snap.get("last_price")
@@ -1017,7 +1244,7 @@ def _normalize_portfolio_tickers(tickers_list: list[str]) -> list[str]:
     return out
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=_YF_CACHE_TTL, show_spinner=False)
 def _fetch_portfolio_series_cached(
     tickers: tuple[str, ...],
 ) -> tuple[tuple[tuple[str, pd.DataFrame], ...], tuple[str, ...]]:
@@ -1025,21 +1252,18 @@ def _fetch_portfolio_series_cached(
     series_items: list[tuple[str, pd.DataFrame]] = []
     failed: list[str] = []
     for symbol in tickers:
-        try:
-            hist = _yf_ticker(symbol).history(
-                period="5y",
-                auto_adjust=False,
-                actions=False,
-            )
-            df = clean_ohlcv(hist)
-            if df.empty or "Close" not in df.columns:
-                failed.append(symbol)
-                logger.warning("Portfolio: no Close data for %s", symbol)
-                continue
-            series_items.append((symbol, df))
-        except Exception as exc:
+        hist, last_exc = _fetch_history_with_retry(
+            symbol, period="5y", auto_adjust=False, actions=False
+        )
+        df = clean_ohlcv(hist)
+        if df.empty or "Close" not in df.columns:
             failed.append(symbol)
-            logger.warning("Portfolio: failed %s: %s", symbol, exc)
+            logger.warning("Portfolio: no Close data for %s", symbol)
+            if last_exc is not None and _is_rate_limited(last_exc):
+                logger.warning(_YAHOO_RATE_LIMIT_USER_MSG)
+            continue
+        series_items.append((symbol, df))
+        time.sleep(random.uniform(0.15, 0.45))
     return tuple(series_items), tuple(failed)
 
 
@@ -1091,7 +1315,7 @@ def _fetch_macro_close_series(
         return pd.Series(dtype=float)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=_YF_CACHE_TTL, show_spinner=False)
 def fetch_ml_historical_data(
     ticker_symbol: str,
     years: int,
@@ -1115,38 +1339,18 @@ def fetch_ml_historical_data(
     yrs = max(1, min(10, int(years)))
     period = f"{yrs}y"
 
-    max_retries = 3
-    hist = None
-    last_exception: Exception | None = None
+    hist, last_exception = _fetch_history_with_retry(
+        symbol, period=period, auto_adjust=True, actions=False
+    )
 
-    for attempt in range(max_retries):
-        try:
-            hist = _yf_ticker(symbol).history(
-                period=period,
-                auto_adjust=True,
-                actions=False,
-            )
-            if hist is not None and not hist.empty and "Close" in hist.columns:
-                break
-        except Exception as exc:
-            last_exception = exc
-            logger.warning(
-                "fetch_ml_historical_data attempt %s/%s failed for %s: %s",
-                attempt + 1,
-                max_retries,
+    if hist.empty or "Close" not in hist.columns:
+        raise ValueError(
+            _yahoo_fetch_error_message(
                 symbol,
-                exc,
+                last_exception=last_exception,
+                context="series históricas",
             )
-        if attempt < max_retries - 1:
-            time.sleep(1)
-
-    if hist is None or hist.empty or "Close" not in hist.columns:
-        error_msg = (
-            f"Fallo al descargar datos de {symbol} tras {max_retries} intentos. "
         )
-        if last_exception:
-            error_msg += f"Error interno: {last_exception}"
-        raise ValueError(error_msg)
 
     if getattr(hist.index, "tz", None) is not None:
         hist.index = hist.index.tz_convert(None)
