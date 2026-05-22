@@ -16,15 +16,16 @@ NAV_ROWS: tuple[tuple[str, str, str], ...] = (
     ("valuation", VALUATION_MENU_LABEL, "calculator"),
     ("sandbox", "Sandbox Quant", "terminal"),
     ("ml", "ML Predictor", "cpu"),
-    ("export", "Data Export", "download"),
 )
 
 MODULE_IDS: list[str] = [row[0] for row in NAV_ROWS]
+MODULES_ORDER: list[str] = MODULE_IDS
 DEFAULT_MODULE_ID = MODULE_IDS[0]
 
 MENU_STATE_KEY = "ibero_main_nav"
 CURRENT_MODULE_KEY = "current_module"
 PENDING_NAV_KEY = "pending_nav_module"
+_NAV_SYNC_MENU_KEY = "_ibero_sync_menu_from_module"
 
 _ID_TO_LABEL: dict[str, str] = {row[0]: row[1] for row in NAV_ROWS}
 _LABEL_TO_ID: dict[str, str] = {row[1]: row[0] for row in NAV_ROWS}
@@ -39,29 +40,42 @@ def _menu_index_for_module(module_id: str) -> int:
         return 0
 
 
+def _sync_menu_widget_to_module(module_id: str) -> None:
+    """Align ``option_menu`` session state (call only before ``option_menu`` is drawn)."""
+    if module_id in _ID_TO_LABEL:
+        st.session_state[MENU_STATE_KEY] = _ID_TO_LABEL[module_id]
+
+
 def apply_pending_navigation() -> None:
     """Apply deferred navigation before the sidebar ``option_menu`` is drawn."""
     pending = st.session_state.pop(PENDING_NAV_KEY, None)
     if pending and pending in _ID_TO_LABEL:
         st.session_state[CURRENT_MODULE_KEY] = pending
-        st.session_state[MENU_STATE_KEY] = _ID_TO_LABEL[pending]
+        _sync_menu_widget_to_module(pending)
+        st.session_state[_NAV_SYNC_MENU_KEY] = True
 
 
 def render_sidebar() -> str:
-    """Draw sidebar and return the active module id (synced with session state)."""
+    """Draw sidebar, sync ``current_module`` with menu selection, rerun if changed."""
     if CURRENT_MODULE_KEY not in st.session_state:
         st.session_state[CURRENT_MODULE_KEY] = DEFAULT_MODULE_ID
 
-    current_module = st.session_state[CURRENT_MODULE_KEY]
+    previous_module = st.session_state[CURRENT_MODULE_KEY]
+    current_module = previous_module
     if current_module not in _ID_TO_LABEL:
         current_module = DEFAULT_MODULE_ID
         st.session_state[CURRENT_MODULE_KEY] = current_module
 
+    if MENU_STATE_KEY not in st.session_state:
+        _sync_menu_widget_to_module(current_module)
+    elif st.session_state.get(MENU_STATE_KEY) not in _LABEL_TO_ID:
+        _sync_menu_widget_to_module(current_module)
+    elif st.session_state.pop(_NAV_SYNC_MENU_KEY, False):
+        _sync_menu_widget_to_module(current_module)
+
     menu_index = _menu_index_for_module(current_module)
     labels = [row[1] for row in NAV_ROWS]
     icons = [row[2] for row in NAV_ROWS]
-
-    st.session_state[MENU_STATE_KEY] = _ID_TO_LABEL[current_module]
 
     with st.sidebar:
         logo_col, title_col = st.columns(
@@ -102,16 +116,28 @@ def render_sidebar() -> str:
             key=MENU_STATE_KEY,
         )
         st.markdown(
-            '<p class="ibero-nav-footer">Docencia de Planta - Innovación 4.0</p>',
+            """
+            <div class="ibero-nav-footer">
+              <span class="ibero-nav-footer-org">Facultad de Ciencias Empresariales</span>
+              <span class="ibero-nav-footer-copy">© 2026 · Todos los derechos reservados.</span>
+              <span class="ibero-nav-footer-author">Arley Nicolas Muñoz</span>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
 
     active_id = _LABEL_TO_ID.get(selected_label, DEFAULT_MODULE_ID)
     st.session_state[CURRENT_MODULE_KEY] = active_id
+
+    if active_id != previous_module:
+        st.rerun()
+
     return active_id
 
 
 def navigate_to_module(module_id: str) -> None:
-    """Queue navigation to a module; applied on next rerun before the sidebar menu."""
-    if module_id in _ID_TO_LABEL:
-        st.session_state[PENDING_NAV_KEY] = module_id
+    """Jump to a module; menu label sync runs on next rerun via ``apply_pending_navigation``."""
+    if module_id not in _ID_TO_LABEL:
+        return
+    st.session_state[CURRENT_MODULE_KEY] = module_id
+    st.session_state[PENDING_NAV_KEY] = module_id

@@ -299,7 +299,7 @@ def render() -> None:
     st.markdown(
         """
         <div class="ibero-hero">
-            <h1>ML Predictor</h1>
+            <p class="ibero-hero-heading">ML Predictor</p>
             <p>
                 Laboratorio pedagógico de Ciencia de Datos aplicada a finanzas: configure
                 el experimento, extraiga series históricas, entrene modelos de scikit-learn
@@ -358,53 +358,73 @@ def render() -> None:
             width="stretch",
             key="ml_train_btn",
         ):
-            with st.spinner("Extrayendo y alineando datos financieros históricos..."):
-                df = fetch_ml_historical_data(ticker, train_years, include_macro)
-
-            if df.empty:
-                st.error(
-                    f"No se pudo consolidar el dataset para **{ticker}**. "
-                    "Verifique el símbolo o reduzca el rango de años."
-                )
-            else:
-                try:
-                    with st.spinner(
-                        "Entrenando modelo y evaluando en conjunto de prueba..."
-                    ):
-                        split = prepare_ml_supervised_split(df, test_ratio=0.2)
-                        result = train_and_evaluate(
-                            model_choice,
-                            split.X_train,
-                            split.X_test,
-                            split.y_train,
-                            split.y_test,
-                        )
-
-                    st.session_state["ml_training_df"] = df
-                    st.session_state["ml_fitted_model"] = result.model
-                    st.session_state["ml_y_test"] = split.y_test
-                    st.session_state["ml_y_pred"] = result.y_pred
-                    st.session_state["ml_metrics"] = result.metrics
-                    st.session_state["ml_feature_names"] = split.feature_names
-                    st.session_state["ml_model_choice_stored"] = model_choice
-                    st.session_state["ml_split_info"] = {
-                        "n_train": len(split.X_train),
-                        "n_test": len(split.X_test),
-                        "train_end": str(split.train_end.date()),
-                        "test_start": str(split.test_start.date()),
-                    }
-                    st.session_state.pop("ml_future_forecast", None)
-
-                    cols = ", ".join(df.columns.tolist())
-                    st.success(
-                        f"Modelo entrenado y evaluado. Dataset: **{len(df)}** filas "
-                        f"({cols}). Proyección y gráfico disponibles abajo."
+            try:
+                with st.spinner(
+                    "Extrayendo y alineando datos financieros históricos..."
+                ):
+                    df = fetch_ml_historical_data(
+                        ticker, train_years, include_macro
                     )
-                    st.dataframe(df.tail(8), use_container_width=True)
-                except ValueError as exc:
-                    st.error(str(exc))
-                except Exception as exc:
-                    st.error(f"Error al entrenar el modelo: {exc}")
+
+                if df.empty:
+                    st.error(
+                        f"El dataset consolidado para **{ticker}** quedó vacío "
+                        "tras la limpieza de datos."
+                    )
+                    st.stop()
+            except ValueError as ve:
+                st.error(f"❌ Error de Conexión: {ve}")
+                if st.button(
+                    "🔄 Limpiar Caché y Reintentar",
+                    key="ml_clear_cache_retry",
+                ):
+                    st.cache_data.clear()
+                    st.rerun()
+                st.stop()
+            except Exception as e:
+                st.error(
+                    f"❌ Ocurrió un error inesperado al procesar los datos: {e}"
+                )
+                st.stop()
+
+            try:
+                with st.spinner(
+                    "Entrenando modelo y evaluando en conjunto de prueba..."
+                ):
+                    split = prepare_ml_supervised_split(df, test_ratio=0.2)
+                    result = train_and_evaluate(
+                        model_choice,
+                        split.X_train,
+                        split.X_test,
+                        split.y_train,
+                        split.y_test,
+                    )
+
+                st.session_state["ml_training_df"] = df
+                st.session_state["ml_fitted_model"] = result.model
+                st.session_state["ml_y_test"] = split.y_test
+                st.session_state["ml_y_pred"] = result.y_pred
+                st.session_state["ml_metrics"] = result.metrics
+                st.session_state["ml_feature_names"] = split.feature_names
+                st.session_state["ml_model_choice_stored"] = model_choice
+                st.session_state["ml_split_info"] = {
+                    "n_train": len(split.X_train),
+                    "n_test": len(split.X_test),
+                    "train_end": str(split.train_end.date()),
+                    "test_start": str(split.test_start.date()),
+                }
+                st.session_state.pop("ml_future_forecast", None)
+
+                cols = ", ".join(df.columns.tolist())
+                st.success(
+                    f"Modelo entrenado y evaluado. Dataset: **{len(df)}** filas "
+                    f"({cols}). Proyección y gráfico disponibles abajo."
+                )
+                st.dataframe(df.tail(8), use_container_width=True)
+            except ValueError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"Error al entrenar el modelo: {exc}")
 
     _render_metrics_block(ticker)
     _render_visualization_block(ticker)

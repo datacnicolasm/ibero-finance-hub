@@ -53,9 +53,13 @@ class SandboxRunResult:
     error_message: str | None = None
 
 
-def _make_local_context(sandbox_data: dict[str, Any]) -> dict[str, Any]:
+def _make_local_context(
+    sandbox_data: dict[str, Any],
+    portfolio: dict[str, pd.DataFrame] | None = None,
+) -> dict[str, Any]:
     ctx: dict[str, Any] = {
         "data": sandbox_data,
+        "portfolio": portfolio if portfolio else {},
         "pd": pd,
         "np": np,
     }
@@ -114,23 +118,32 @@ def _exec_cell_code(
         sys.stdout = old_stdout
 
 
-def run_sandbox_script(user_code: str, sandbox_data: dict[str, Any]) -> SandboxRunResult:
-    """Execute student code with preloaded ``data``, ``pd``, and ``np``.
+def run_sandbox_script(
+    user_code: str,
+    sandbox_data: dict[str, Any],
+    portfolio: dict[str, pd.DataFrame] | None = None,
+) -> SandboxRunResult:
+    """Execute student code with preloaded ``data``, ``portfolio``, ``pd``, and ``np``.
 
     Args:
         user_code: Python source typed by the user.
         sandbox_data: Full payload from ``fetch_sandbox_data``.
+        portfolio: Optional ``{ticker: OHLCV DataFrame}`` from sidebar load (~5y history).
 
     Returns:
         ``SandboxRunResult`` with captured stdout or error message.
     """
-    return _exec_cell_code(user_code, _make_local_context(sandbox_data))
+    return _exec_cell_code(
+        user_code,
+        _make_local_context(sandbox_data, portfolio=portfolio),
+    )
 
 
 def run_sandbox_cells_through(
     cell_codes: list[str],
     end_index: int,
     sandbox_data: dict[str, Any],
+    portfolio: dict[str, pd.DataFrame] | None = None,
 ) -> list[SandboxRunResult]:
     """Run cells 0 through ``end_index`` in one shared kernel (Jupyter-style).
 
@@ -140,6 +153,7 @@ def run_sandbox_cells_through(
         cell_codes: Source for each notebook cell.
         end_index: Last cell index to run (inclusive).
         sandbox_data: Full payload from ``fetch_sandbox_data``.
+        portfolio: Optional ``{ticker: OHLCV DataFrame}`` injected as global ``portfolio``.
 
     Returns:
         One ``SandboxRunResult`` per executed cell (length <= end_index + 1).
@@ -147,7 +161,7 @@ def run_sandbox_cells_through(
     if end_index < 0:
         return []
 
-    local_context = _make_local_context(sandbox_data)
+    local_context = _make_local_context(sandbox_data, portfolio=portfolio)
     results: list[SandboxRunResult] = []
 
     for i in range(end_index + 1):

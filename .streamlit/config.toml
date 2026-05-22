@@ -1,8 +1,10 @@
 [theme]
 primaryColor = "#e8c042"
 backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f2f1f1"
 textColor = "#494646"
+borderColor = "#d19e40"
+showWidgetBorder = true
 font = "sans serif"
 
 [theme.sidebar]
@@ -13,3 +15,4 @@ borderColor = "#d19e40"
 
 [server]
 headless = true
+baseUrlPath = "ibero-finance-hub"

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 def _q(value: float, places: str = "0.0001") -> Decimal:
@@ -167,7 +170,8 @@ def dcf_schedule(
 
     Returns:
         Dict with enterprise_value, equity_value, value_per_share, pv_explicit,
-        pv_terminal, chart_labels, chart_fcf, chart_pv.
+        pv_terminal, chart_labels, chart_nominal_fcf, chart_pv,
+        terminal_value_nominal, wacc_minus_g.
     """
     core = dcf_equity_value_one_stage(
         free_cash_flows, wacc, terminal_growth, net_debt, shares_outstanding
@@ -182,8 +186,10 @@ def dcf_schedule(
         "pv_explicit": 0.0,
         "pv_terminal": 0.0,
         "chart_labels": [],
-        "chart_fcf": [],
+        "chart_nominal_fcf": [],
         "chart_pv": [],
+        "terminal_value_nominal": 0.0,
+        "wacc_minus_g": 0.0,
         "valid": False,
     }
     if not fcf:
@@ -205,7 +211,6 @@ def dcf_schedule(
     pv_tv = tv / ((1.0 + w) ** n)
 
     labels = [f"Año {i}" for i in range(1, n + 1)] + ["Terminal"]
-    chart_fcf = fcf + [float(tv)]
     chart_pv = pv_by_year + [float(_q(pv_tv, "0.01"))]
 
     return {
@@ -214,8 +219,10 @@ def dcf_schedule(
         "value_per_share": core["value_per_share"],
         "pv_explicit": float(_q(pv_explicit, "0.01")),
         "pv_terminal": float(_q(pv_tv, "0.01")),
+        "terminal_value_nominal": float(_q(tv, "0.01")),
+        "wacc_minus_g": float(_q(w - g, "0.0001")),
         "chart_labels": labels,
-        "chart_fcf": chart_fcf,
+        "chart_nominal_fcf": fcf,
         "chart_pv": chart_pv,
         "valid": True,
     }
@@ -261,6 +268,7 @@ def dcf_equity_value_one_stage(
     fcf_n = fcf[-1]
     tv = fcf_n * (1.0 + g) / (w - g)
     n = len(fcf)
+    # Gordon terminal: discount full TV back n explicit years (e.g. 5 for standard DCF).
     pv_tv = tv / ((1.0 + w) ** n)
 
     ev = float(_q(pv_explicit + pv_tv, "0.01"))
@@ -269,6 +277,22 @@ def dcf_equity_value_one_stage(
     out["enterprise_value"] = ev
     out["equity_value"] = eq
     out["value_per_share"] = vps
+    logger.debug(
+        "DCF audit | years=%d WACC=%.4f g=%.4f | PV_FCF=%.4e PV_TV=%.4e "
+        "(TV_nom=%.4e @ (1+WACC)^%d) | EV=%.4e net_debt=%.4e EQ=%.4e shares=%.4e VPS=%.4f",
+        n,
+        w,
+        g,
+        pv_explicit,
+        pv_tv,
+        tv,
+        n,
+        ev,
+        nd,
+        eq,
+        sh,
+        vps,
+    )
     return out
 
 
